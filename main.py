@@ -9,17 +9,19 @@ from datetime import datetime, timedelta
 
 
 # Configuration
-USERNAME = "my.login@loggi.com"
-ACCESS_TOKEN = "token"  # see https://id.atlassian.com/manage-profile/security/api-tokens"
-JIRA_CLOUD_DOMAIN = "subdomain"  # the subdomain used, like https://subdomain.atlassian.net
+USERNAME = os.getenv("USERNAME")  # my.login@loggi.com
+ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")  # see https://id.atlassian.com/manage-profile/security/api-tokens"
+JIRA_CLOUD_DOMAIN = os.getenv("JIRA_CLOUD_DOMAIN")  # the subdomain part of url, like https://subdomain.atlassian.net
+PROJECT = os.getenv("PROJECT")  # the project code, as FBO, when issues are like FBO-123
 
 # Defaults
-project = "FBO"
-jql = f"project={project} AND resolved >= startOfYear() AND project = FBO AND status = DONE"
+jql = f"project={PROJECT} AND resolved >= startOfYear() AND project = FBO AND status = DONE"
 fields = "key,assignee,status,created,resolutiondate,description"  # Fields to retrieve
 max_results = 100  # set to maximum value available for search endpoint
 # lower cased list of status used in the workflow
 stasuses_available = ["to do", "on hold", "in progress", "code review", "broadcast", "done"]
+report_header = ["key", "assignee", "created", "resolved"] + stasuses_available + ["description"]
+
 
 # JIRA API endpoints
 base_url = f"https://{JIRA_CLOUD_DOMAIN}.atlassian.net/rest/api/3/"
@@ -36,11 +38,14 @@ params = {
 auth = (USERNAME, ACCESS_TOKEN)  # Replace with your JIRA username and API key
 
 
-def hours_to_time_string(hours: float):
-    time_delta = timedelta(hours=hours)
-    hours, remainder = divmod(time_delta.seconds, 3600)
+def hours_to_time_string(time_delta: timedelta):
+    hours, remainder = divmod(int(time_delta.total_seconds()), 3600)
     minutes, seconds = divmod(remainder, 60)
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+def jira_date_to_naive(date_str):
+    date_format = "%Y-%m-%dT%H:%M:%S.%f%z"
+    return datetime.strptime(date_str, date_format).replace(tzinfo=None)
 
 
 def adf_to_text(adf: dict):
@@ -65,7 +70,7 @@ def adf_to_text(adf: dict):
 
 
 def time_in_status_per_key():
-    header = ["key", "assignee", "created", "resolved"]
+    """Produce a "report", meaning a simple spreadsheet like matrix."""
     report_content = []
 
     # retrieve list of issues, through the paginated API
@@ -88,8 +93,8 @@ def time_in_status_per_key():
             key = issue["key"]
             assignee = issue["fields"]["assignee"]["emailAddress"] if issue["fields"][
                 "assignee"] else ""
-            created = issue["fields"]["created"]
-            resolved = issue["fields"]["resolutiondate"]
+            created = jira_date_to_naive(issue["fields"]["created"])
+            resolved = jira_date_to_naive(issue["fields"]["resolutiondate"])
             description = adf_to_text(issue["fields"]["description"])
 
             report_item = [key, assignee, created, resolved]
@@ -101,7 +106,7 @@ def time_in_status_per_key():
             from_date = datetime.strptime(issue["fields"]["created"], "%Y-%m-%dT%H:%M:%S.%f%z")
 
             # cycle time per status and per issue
-            cycle_times = defaultdict(lambda: 0)
+            cycle_times = defaultdict(timedelta)
 
             # changelog presents a multitude of info, but we're only interested in status changes
             changelog = [change for change in changelog if change["items"][0]["field"] == "status"]
@@ -113,29 +118,31 @@ def time_in_status_per_key():
                 to_status = changelog[i]["items"][0]["toString"]
                 to_date = datetime.strptime(changelog[i]["created"], "%Y-%m-%dT%H:%M:%S.%f%z")
                 if from_status and to_status:
-                    cycle_time = (
-                                             to_date - from_date).total_seconds() / 3600.0  # Cycle time in hours
+                    cycle_time = to_date - from_date
                     cycle_times[from_status.lower()] += cycle_time
 
-            header.extend(stasuses_available)
             for st in stasuses_available:
                 report_item.append(hours_to_time_string(cycle_times[st]))
 
             # leaving the biggest field to be last
-            header.append("description")
             report_item.append(description)
-
             report_content.append(report_item)
+
+    return sorted(report_content, key=lambda x: x[3])
+
+
+def to_spreadsheet(report_content):
 
     # Create a new Excel workbook and worksheet
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.append(header)
+    ws.append(report_header)
     for item in report_content:
         ws.append(item)
 
-    wb.save(os.path.join(pathlib.Path().resolve(), "output", f"{project}_status_times.xlsx"))
+    wb.save(os.path.join(pathlib.Path().resolve(), "output", f"{PROJECT}_status_times.xlsx"))
 
 
 if __name__ == '__main__':
-    time_in_status_per_key()
+    report_content = time_in_status_per_key()
+    to_spreadsheet(report_content)
