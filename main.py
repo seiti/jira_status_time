@@ -1,4 +1,6 @@
+import json
 import os
+from os import path
 import pathlib
 from collections import defaultdict
 
@@ -20,7 +22,6 @@ fields = "key,assignee,status,created,resolutiondate,description"  # Fields to r
 max_results = 100  # set to maximum value available for search endpoint
 # lower cased list of status used in the workflow
 stasuses_available = ["to do", "on hold", "in progress", "code review", "broadcast", "done"]
-report_header = ["key", "assignee", "created", "resolved"] + stasuses_available + ["description"]
 
 
 # JIRA API endpoints
@@ -42,6 +43,7 @@ def hours_to_time_string(time_delta: timedelta):
     hours, remainder = divmod(int(time_delta.total_seconds()), 3600)
     minutes, seconds = divmod(remainder, 60)
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
 
 def jira_date_to_naive(date_str):
     date_format = "%Y-%m-%dT%H:%M:%S.%f%z"
@@ -71,6 +73,11 @@ def adf_to_text(adf: dict):
 
 def time_in_status_per_key():
     """Produce a "report", meaning a simple spreadsheet like matrix."""
+    report_header = (
+            ["key", "assignee", "created", "resolved"]
+            + stasuses_available
+            + ["description"]
+    )
     report_content = []
 
     # retrieve list of issues, through the paginated API
@@ -128,21 +135,29 @@ def time_in_status_per_key():
             report_item.append(description)
             report_content.append(report_item)
 
-    return sorted(report_content, key=lambda x: x[3])
+    return [report_header] + sorted(report_content, key=lambda x: x[3])
 
 
-def to_spreadsheet(report_content):
-
-    # Create a new Excel workbook and worksheet
+def to_spreadsheet(report_content, filepath):
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.append(report_header)
     for item in report_content:
         ws.append(item)
+    wb.save(filepath)
 
-    wb.save(os.path.join(pathlib.Path().resolve(), "output", f"{PROJECT}_status_times.xlsx"))
+
+def to_json(report_content, filepath):
+    data = dict(
+        columns=report_content[0],  # header
+        values=report_content[1:],  # content
+    )
+    out = json.dumps(data, indent=4, default=str)
+    with open(filepath, "w") as f:
+        f.write(out)
 
 
 if __name__ == '__main__':
     report_content = time_in_status_per_key()
-    to_spreadsheet(report_content)
+    base_path = path.join(pathlib.Path().resolve(), "output")
+    to_spreadsheet(report_content, path.join(base_path, f"{PROJECT}_status_times.xlsx"))
+    to_json(report_content, path.join(base_path, f"{PROJECT}_status_times.json"))
