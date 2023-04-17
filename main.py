@@ -1,6 +1,9 @@
-import json
 import os
 from os import path
+import json
+
+import pandas as pd
+import matplotlib.pyplot as plt
 import pathlib
 from collections import defaultdict
 
@@ -39,7 +42,9 @@ params = {
 auth = (USERNAME, ACCESS_TOKEN)  # Replace with your JIRA username and API key
 
 
-def hours_to_time_string(time_delta: timedelta):
+def timedelta_to_string(time_delta: timedelta):
+    if type(time_delta) is not timedelta:
+        return time_delta
     hours, remainder = divmod(int(time_delta.total_seconds()), 3600)
     minutes, seconds = divmod(remainder, 60)
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
@@ -92,6 +97,7 @@ def time_in_status_per_key():
     else:
         issues_list.extend(response.json()["issues"])
 
+    # process each issue, retrieving history data
     with alive_bar(len(issues_list), force_tty=True) as t:
         for issue in issues_list:
             t()
@@ -129,7 +135,7 @@ def time_in_status_per_key():
                     cycle_times[from_status.lower()] += cycle_time
 
             for st in stasuses_available:
-                report_item.append(hours_to_time_string(cycle_times[st]))
+                report_item.append(cycle_times[st])
 
             # leaving the biggest field to be last
             report_item.append(description)
@@ -142,6 +148,7 @@ def to_spreadsheet(report_content, filepath):
     wb = openpyxl.Workbook()
     ws = wb.active
     for item in report_content:
+        item = [timedelta_to_string(element) for element in item]
         ws.append(item)
     wb.save(filepath)
 
@@ -149,15 +156,72 @@ def to_spreadsheet(report_content, filepath):
 def to_json(report_content, filepath):
     data = dict(
         columns=report_content[0],  # header
-        values=report_content[1:],  # content
+        values=[item for item in report_content[1:]],  # content
     )
-    out = json.dumps(data, indent=4, default=str)
+    out = json.dumps(
+        data,
+        indent=4,
+        ensure_ascii=False,  # enabling unicode chars
+        default=str,  # mostly for datetime serialization
+    )
     with open(filepath, "w") as f:
         f.write(out)
+
+
+def diagrams(report_content=None):
+
+    def time_ticks(x, pos):
+        seconds = int(x / (60*60*(10**9)))  # convert nanoseconds to seconds
+        # create datetime object because its string representation is alright
+        return str(timedelta(seconds=seconds))
+
+    data = pd.DataFrame(report_content[1:], columns=report_content[0])
+
+    # diagrams considered
+    cfd = pd.DataFrame(columns=['Date'] + stasuses_available)
+    cdd = pd.DataFrame(columns=['Date'] + stasuses_available)
+
+    # set the date range for the chart
+    start_date = data['resolved'].min().date()
+    end_date = data['resolved'].max().date() + timedelta(days=1)
+    date_range = pd.date_range(start_date, end_date)
+
+    # iterate over the date range and aggregate the data for each day
+    for date in date_range:
+        # only data up until current date, enforces the "cumulative"
+        cumulative_data = data[(date_range[0] <= data['resolved']) & (data['resolved'] <= date)]
+        # count the number of issues in each status
+        c = {st: len(cumulative_data[cumulative_data[st] != timedelta()]) for st in stasuses_available}
+        c['Date'] = date
+        cfd = pd.concat([cfd, pd.DataFrame([c])], ignore_index=True)
+
+        # only data on the current date, not cumulative
+        criteria = (date <= data['resolved']) & (data['resolved'] <= date + timedelta(days=1))
+        current_data = data[criteria]
+        # sum the duration in each status
+        d = {st: current_data[st].sum() for st in stasuses_available}
+        d['Date'] = date
+        cdd = pd.concat([cdd, pd.DataFrame([d])], ignore_index=True)
+
+    # date column as the index, enabling sensible defaults when plotting
+    cfd.set_index('Date', inplace=True)
+    cdd.set_index('Date', inplace=True)
+
+
+    # plotting
+    fig, axes = plt.subplots(nrows=2, ncols=1, layout="constrained")
+    cfd.plot.area(title='Cumulative Flow Chart', ax=axes[0])
+    cdd_plot = cdd.plot.line(title='Duration Chart', ax=axes[1])
+    cdd_plot.yaxis.set_major_formatter(time_ticks)
+    plt.show()
 
 
 if __name__ == '__main__':
     report_content = time_in_status_per_key()
     base_path = path.join(pathlib.Path().resolve(), "output")
     to_spreadsheet(report_content, path.join(base_path, f"{PROJECT}_status_times.xlsx"))
-    to_json(report_content, path.join(base_path, f"{PROJECT}_status_times.json"))
+    # to_json(
+    #     [item[: -1] for item in report_content],  # removing description
+    #     path.join(base_path, f"{PROJECT}_status_times.json"),
+    # )
+    diagrams(report_content)
