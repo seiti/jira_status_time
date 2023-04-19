@@ -20,7 +20,7 @@ JIRA_CLOUD_DOMAIN = os.getenv("JIRA_CLOUD_DOMAIN")  # the subdomain part of url,
 PROJECT = os.getenv("PROJECT")  # the project code, as FBO, when issues are like FBO-123
 
 # Defaults
-jql = f"project={PROJECT} AND resolved >= startOfWeek() AND project = FBO AND status = DONE"
+jql = f"project={PROJECT} AND resolved >= startOfYear() AND project = FBO AND status = DONE"
 fields = "key,assignee,status,created,resolutiondate,description"  # Fields to retrieve
 max_results = 100  # set to maximum value available for search endpoint
 # lower cased list of status used in the workflow
@@ -156,8 +156,8 @@ def time_in_status_per_key():
         cfd_items.append([dt] + [status_count[st] for st in statuses_available])
 
     reports = [
-        ('time_in_status', [time_in_status_header] + sorted(time_in_status, key=lambda x: x[3])),
-        ('cfd', [cfd_header] + sorted(cfd_items, key=lambda x: x[0])),
+        ('Status Duration', [time_in_status_header] + sorted(time_in_status, key=lambda x: x[3])),
+        ('CFD', [cfd_header] + sorted(cfd_items, key=lambda x: x[0])),
     ]
 
     return reports
@@ -209,7 +209,7 @@ def diagrams(reports):
     # iterate over the date range and aggregate the data for each day
     for date in date_range:
         # only data up until current date, enforces the "cumulative"
-        # cumulative_data = data[(date_range[0] <= data['resolved']) & (data['resolved'] <= date)]
+        #cumulative_data = data[(date_range[0] <= data['resolved']) & (data['resolved'] <= date)]
 
         # count the number of issues in each status
         # c = {st: len(cumulative_data[cumulative_data[st] != timedelta()]) for st in statuses_available}
@@ -219,8 +219,10 @@ def diagrams(reports):
         criteria = (date <= data['resolved']) & (data['resolved'] <= date + timedelta(days=1))
         current_data = data[criteria]
 
-        # sum the duration in each status
-        d = {st: current_data[st].sum() for st in statuses_available}
+        # mean of duration in each status
+        # TODO duration is multivariate, given the various statuses. A better alternative is to render a series of boxplot plot per
+        # status instaed, or even something like https://www.jstatsoft.org/article/download/v025c01/239
+        d = {st: (int(current_data[st].mean())) for st in statuses_available}
         d['Date'] = date
         cdd = pd.concat([cdd, pd.DataFrame([d])], ignore_index=True)
 
@@ -230,18 +232,19 @@ def diagrams(reports):
     # plotting
     fig, axes = plt.subplots(nrows=2, ncols=1, layout="constrained", figsize=(10, 8))
     # cfd.plot.area(title='Cumulative Flow Diagram', ax=axes[0])
-    cdd_plot = cdd.plot.line(title=report_name, ax=axes[1])
+    # cdd_plot = cdd.plot.line(title=report_name, ax=axes[1])
+    cdd_plot = cdd.plot.area(title=report_name, ax=axes[1])
     cdd_plot.yaxis.set_major_formatter(nanos_to_sensible_str)
     plt.show()
 
 
-if __name__ == '__main__':
-    reports = time_in_status_per_key()
-
-    base_path = path.join(pathlib.Path().resolve(), "output")
-    to_spreadsheet(reports, path.join(base_path, f"{PROJECT}_status_times.xlsx"))
-    # to_json(
-    #     [item[: -1] for item in report_content],  # removing description
-    #     path.join(base_path, f"{PROJECT}_status_times.json"),
-    # )
-    diagrams(reports)
+# if __name__ == '__main__':
+#     reports = time_in_status_per_key()
+#
+#     base_path = path.join(pathlib.Path().resolve(), "output")
+#     to_spreadsheet(reports, path.join(base_path, f"{PROJECT}_status_times.xlsx"))
+#     # to_json(
+#     #     [item[: -1] for item in report_content],  # removing description
+#     #     path.join(base_path, f"{PROJECT}_status_times.json"),
+#     # )
+#     diagrams(reports)
