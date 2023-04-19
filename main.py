@@ -20,11 +20,11 @@ JIRA_CLOUD_DOMAIN = os.getenv("JIRA_CLOUD_DOMAIN")  # the subdomain part of url,
 PROJECT = os.getenv("PROJECT")  # the project code, as FBO, when issues are like FBO-123
 
 # Defaults
-jql = f"project={PROJECT} AND resolved >= startOfYear() AND project = FBO AND status = DONE"
+jql = f"project={PROJECT} AND resolved >= startOfWeek() AND project = FBO AND status = DONE"
 fields = "key,assignee,status,created,resolutiondate,description"  # Fields to retrieve
 max_results = 100  # set to maximum value available for search endpoint
 # lower cased list of status used in the workflow
-stasuses_available = ["to do", "on hold", "in progress", "code review", "broadcast", "done"]
+statuses_available = ["to do", "on hold", "in progress", "code review", "broadcast", "done"]
 
 
 # JIRA API endpoints
@@ -78,12 +78,14 @@ def adf_to_text(adf: dict):
 
 def time_in_status_per_key():
     """Produce a "report", meaning a simple spreadsheet like matrix."""
-    report_header = (
+    time_in_status_header = (
             ["key", "assignee", "created", "resolved"]
-            + stasuses_available
+            + statuses_available
             + ["description"]
     )
-    report_content = []
+    time_in_status = []
+    cfd_header = ['date'] + statuses_available
+    cfd_report = defaultdict(lambda: defaultdict(int))
 
     # retrieve list of issues, through the paginated API
     response = requests.get(search_url, params=params, auth=auth)
@@ -109,8 +111,8 @@ def time_in_status_per_key():
             created = jira_date_to_naive(issue["fields"]["created"])
             resolved = jira_date_to_naive(issue["fields"]["resolutiondate"])
             description = adf_to_text(issue["fields"]["description"])
-
-            report_item = [key, assignee, created, resolved]
+            time_in_status_item = [key, assignee, created, resolved]
+            current_status_item = []
 
             # detailing the issue at hand; step required to obtain status change data
             issue_response = requests.get(issue_url.format(issue['key']), auth=auth)
@@ -119,10 +121,13 @@ def time_in_status_per_key():
             from_date = datetime.strptime(issue["fields"]["created"], "%Y-%m-%dT%H:%M:%S.%f%z")
 
             # cycle time per status and per issue
-            cycle_times = defaultdict(timedelta)
+            durations = defaultdict(timedelta)
+            current_status = dict()
 
             # changelog presents a multitude of info, but we're only interested in status changes
             changelog = [change for change in changelog if change["items"][0]["field"] == "status"]
+
+            # calculating things per status
             for i in range(len(changelog)):
                 if i > 0:
                     from_status = changelog[i - 1]["items"][0]["toString"]
@@ -131,25 +136,40 @@ def time_in_status_per_key():
                 to_status = changelog[i]["items"][0]["toString"]
                 to_date = datetime.strptime(changelog[i]["created"], "%Y-%m-%dT%H:%M:%S.%f%z")
                 if from_status and to_status:
-                    cycle_time = to_date - from_date
-                    cycle_times[from_status.lower()] += cycle_time
+                    durations[from_status.lower()] += (to_date - from_date)
+                if to_status:
+                    current_status[to_date.date()] = to_status.lower()  # considering only the last change of day
 
-            for st in stasuses_available:
-                report_item.append(cycle_times[st])
+            for st in statuses_available:
+                time_in_status_item.append(durations[st])
+
+            for dt, st in current_status.items():
+                cfd_report[dt][st] += 1  # current issue values are consolidated per date
 
             # leaving the biggest field to be last
-            report_item.append(description)
-            report_content.append(report_item)
+            time_in_status_item.append(description)
+            time_in_status.append(time_in_status_item)
 
-    return [report_header] + sorted(report_content, key=lambda x: x[3])
+    # flattening cfd report
+    cfd_items = []
+    for dt, status_count in cfd_report.items():
+        cfd_items.append([dt] + [status_count[st] for st in statuses_available])
+
+    reports = [
+        ('time_in_status', [time_in_status_header] + sorted(time_in_status, key=lambda x: x[3])),
+        ('cfd', [cfd_header] + sorted(cfd_items, key=lambda x: x[0])),
+    ]
+
+    return reports
 
 
-def to_spreadsheet(report_content, filepath):
+def to_spreadsheet(reports, filepath):
     wb = openpyxl.Workbook()
-    ws = wb.active
-    for item in report_content:
-        item = [timedelta_to_string(element) for element in item]
-        ws.append(item)
+    for name, report_content in reports:
+        ws = wb.create_sheet(name)
+        for item in report_content:
+            item = [timedelta_to_string(element) for element in item]
+            ws.append(item)
     wb.save(filepath)
 
 
@@ -168,18 +188,18 @@ def to_json(report_content, filepath):
         f.write(out)
 
 
-def diagrams(report_content=None):
+def diagrams(reports):
 
-    def time_ticks(x, pos):
-        seconds = int(x / (60*60*(10**9)))  # convert nanoseconds to seconds
-        # create datetime object because its string representation is alright
+    def nanos_to_sensible_str(nanos, pos):
+        seconds = int(nanos / 10 ** 9)
+        # using timedelta object because its string representation is alright
         return str(timedelta(seconds=seconds))
 
-    data = pd.DataFrame(report_content[1:], columns=report_content[0])
+    (duration, cfd) = reports
 
-    # diagrams considered
-    cfd = pd.DataFrame(columns=['Date'] + stasuses_available)
-    cdd = pd.DataFrame(columns=['Date'] + stasuses_available)
+    report_name, report_content = duration
+    data = pd.DataFrame(report_content[1:], columns=report_content[0])
+    cdd = pd.DataFrame(columns=['Date'] + statuses_available)
 
     # set the date range for the chart
     start_date = data['resolved'].min().date()
@@ -189,39 +209,39 @@ def diagrams(report_content=None):
     # iterate over the date range and aggregate the data for each day
     for date in date_range:
         # only data up until current date, enforces the "cumulative"
-        cumulative_data = data[(date_range[0] <= data['resolved']) & (data['resolved'] <= date)]
+        # cumulative_data = data[(date_range[0] <= data['resolved']) & (data['resolved'] <= date)]
+
         # count the number of issues in each status
-        c = {st: len(cumulative_data[cumulative_data[st] != timedelta()]) for st in stasuses_available}
-        c['Date'] = date
-        cfd = pd.concat([cfd, pd.DataFrame([c])], ignore_index=True)
+        # c = {st: len(cumulative_data[cumulative_data[st] != timedelta()]) for st in statuses_available}
+        # c['Date'] = date
 
         # only data on the current date, not cumulative
         criteria = (date <= data['resolved']) & (data['resolved'] <= date + timedelta(days=1))
         current_data = data[criteria]
+
         # sum the duration in each status
-        d = {st: current_data[st].sum() for st in stasuses_available}
+        d = {st: current_data[st].sum() for st in statuses_available}
         d['Date'] = date
         cdd = pd.concat([cdd, pd.DataFrame([d])], ignore_index=True)
 
     # date column as the index, enabling sensible defaults when plotting
-    cfd.set_index('Date', inplace=True)
     cdd.set_index('Date', inplace=True)
 
-
     # plotting
-    fig, axes = plt.subplots(nrows=2, ncols=1, layout="constrained")
-    cfd.plot.area(title='Cumulative Flow Chart', ax=axes[0])
-    cdd_plot = cdd.plot.line(title='Duration Chart', ax=axes[1])
-    cdd_plot.yaxis.set_major_formatter(time_ticks)
+    fig, axes = plt.subplots(nrows=2, ncols=1, layout="constrained", figsize=(10, 8))
+    # cfd.plot.area(title='Cumulative Flow Diagram', ax=axes[0])
+    cdd_plot = cdd.plot.line(title=report_name, ax=axes[1])
+    cdd_plot.yaxis.set_major_formatter(nanos_to_sensible_str)
     plt.show()
 
 
 if __name__ == '__main__':
-    report_content = time_in_status_per_key()
+    reports = time_in_status_per_key()
+
     base_path = path.join(pathlib.Path().resolve(), "output")
-    to_spreadsheet(report_content, path.join(base_path, f"{PROJECT}_status_times.xlsx"))
+    to_spreadsheet(reports, path.join(base_path, f"{PROJECT}_status_times.xlsx"))
     # to_json(
     #     [item[: -1] for item in report_content],  # removing description
     #     path.join(base_path, f"{PROJECT}_status_times.json"),
     # )
-    diagrams(report_content)
+    diagrams(reports)
